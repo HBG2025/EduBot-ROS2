@@ -1,7 +1,9 @@
+import math
+
 import rclpy
 from rclpy.node import Node
 
-from std_msgs.msg import Float32
+from std_msgs.msg import Float32MultiArray
 from std_msgs.msg import String
 
 
@@ -12,31 +14,76 @@ class ObstacleAvoidance(Node):
         super().__init__('obstacle_avoidance')
 
         # =====================================================
-        # PARÁMETROS DE EVASIÓN
+        # CONFIGURACION DE EVASION
         # =====================================================
 
-        # Obstáculo detectado a 15 cm
-        self.distancia_obstaculo = 0.15
+        # Angulo que experimentalmente corresponde
+        # al frente fisico del robot.
 
-        # Después de detenerse, debe haber al menos 20 cm
-        # para considerar nuevamente el camino libre.
-        self.distancia_libre = 0.20
+        self.angulo_frente = 180
 
-        # Giro utilizado para intentar evadir el obstáculo
+        # -----------------------------------------------------
+        # Sectores utilizados
+        # -----------------------------------------------------
+
+        # Frente:
+        # 160, 170, 180, 190, 200
+
+        self.sectores_frente = [
+            160,
+            170,
+            180,
+            190,
+            200
+        ]
+
+        # Izquierda:
+        # 110, 120, 130, 140, 150
+
+        self.sectores_izquierda = [
+            110,
+            120,
+            130,
+            140,
+            150
+        ]
+
+        # Derecha:
+        # 210, 220, 230, 240, 250
+
+        self.sectores_derecha = [
+            210,
+            220,
+            230,
+            240,
+            250
+        ]
+
+        # -----------------------------------------------------
+        # Distancias
+        # -----------------------------------------------------
+
+        self.distancia_obstaculo = 0.30
+
+        self.distancia_libre = 0.40
+
+        # -----------------------------------------------------
+        # Giro
+        # -----------------------------------------------------
+
         self.angulo_giro = 45
 
-        # Tiempo estimado para permitir que termine el giro.
-        # Nuestro comando "girar XX" todavía es bloqueante
-        # dentro del ESP32.
-        self.tiempo_espera_giro = 3.0
+        # Tiempo estimado para el giro del robot.
+
+        self.tiempo_espera_giro = 2.0
 
         # =====================================================
-        # VARIABLES DE ESTADO
+        # ESTADO
         # =====================================================
 
-        self.estado = 'INICIO'
+        self.estado = 'ESPERANDO_LIDAR'
 
-        self.distancia_actual = None
+        self.sectores_minimos = None
 
         self.tiempo_fin_giro = 0.0
 
@@ -51,13 +98,13 @@ class ObstacleAvoidance(Node):
         )
 
         # =====================================================
-        # SUSCRIPTOR A LA DISTANCIA DEL LIDAR
+        # SUSCRIPTOR DE SECTORES DEL LIDAR
         # =====================================================
 
         self.suscriptor_lidar = self.create_subscription(
-            Float32,
-            '/lidar/distancia',
-            self.recibir_distancia,
+            Float32MultiArray,
+            '/lidar/sectores_minimos',
+            self.recibir_sectores,
             10
         )
 
@@ -66,40 +113,119 @@ class ObstacleAvoidance(Node):
         # =====================================================
 
         self.timer = self.create_timer(
-            0.10,
+            0.05,
             self.control
         )
 
-        self.get_logger().info(
-            '======================================'
-        )
-
-        self.get_logger().info(
-            ' EVASION DE OBSTACULOS INICIADA'
-        )
+        # =====================================================
+        # MENSAJES DE INICIO
+        # =====================================================
 
         self.get_logger().info(
             '======================================'
         )
 
         self.get_logger().info(
-            'Obstaculo <= 0.15 m'
+            ' EVASION DE OBSTACULOS POR SECTORES'
         )
 
         self.get_logger().info(
-            'Camino libre >= 0.20 m'
+            '======================================'
+        )
+
+        self.get_logger().info(
+            f'Frente fisico: {self.angulo_frente} grados'
+        )
+
+        self.get_logger().info(
+            'Obstaculo <= 0.30 m'
+        )
+
+        self.get_logger().info(
+            'Camino libre >= 0.40 m'
+        )
+
+        self.get_logger().info(
+            f'Giro configurado: {self.angulo_giro} grados'
+        )
+
+        self.get_logger().info(
+            f'Tiempo estimado de giro: '
+            f'{self.tiempo_espera_giro:.1f} s'
         )
 
     # =========================================================
-    # RECIBIR DISTANCIA DEL LIDAR
+    # RECIBIR SECTORES DEL LIDAR
     # =========================================================
 
-    def recibir_distancia(self, msg):
+    def recibir_sectores(self, msg):
 
-        self.distancia_actual = msg.data
+        if len(msg.data) != 36:
+
+            self.get_logger().warning(
+                f'Se recibieron {len(msg.data)} sectores '
+                f'en lugar de 36'
+            )
+
+            return
+
+        self.sectores_minimos = list(
+            msg.data
+        )
 
     # =========================================================
-    # ENVIAR COMANDO AL ESP32
+    # OBTENER DISTANCIA DE UN SECTOR
+    # =========================================================
+
+    def obtener_distancia_sector(self, angulo):
+
+        indice = int(
+            angulo / 10
+        )
+
+        if indice < 0 or indice >= 36:
+
+            return float('nan')
+
+        distancia = self.sectores_minimos[indice]
+
+        if math.isnan(distancia):
+
+            return float('nan')
+
+        return float(distancia)
+
+    # =========================================================
+    # OBTENER DISTANCIA DE UNA ZONA
+    # =========================================================
+
+    def obtener_distancia_zona(self, sectores):
+
+        valores = []
+
+        for angulo in sectores:
+
+            distancia = self.obtener_distancia_sector(
+                angulo
+            )
+
+            if not math.isnan(distancia):
+
+                valores.append(
+                    distancia
+                )
+
+        if not valores:
+
+            return float('nan')
+
+        # Para seguridad utilizamos la distancia minima
+        # de la zona.
+
+        return min(valores)
+
+    # =========================================================
+    # ENVIAR COMANDO
     # =========================================================
 
     def enviar_comando(self, comando):
@@ -117,16 +243,47 @@ class ObstacleAvoidance(Node):
         )
 
     # =========================================================
-    # CONTROL DE EVASIÓN
+    # MOSTRAR ESTADO DE LAS ZONAS
+    # =========================================================
+
+    def mostrar_zonas(self):
+
+        frente = self.obtener_distancia_zona(
+            self.sectores_frente
+        )
+
+        izquierda = self.obtener_distancia_zona(
+            self.sectores_izquierda
+        )
+
+        derecha = self.obtener_distancia_zona(
+            self.sectores_derecha
+        )
+
+        self.get_logger().info(
+            f'ZONAS -> '
+            f'Frente: {frente:.3f} m | '
+            f'Izquierda: {izquierda:.3f} m | '
+            f'Derecha: {derecha:.3f} m'
+        )
+
+        return (
+            frente,
+            izquierda,
+            derecha
+        )
+
+    # =========================================================
+    # CONTROL PRINCIPAL
     # =========================================================
 
     def control(self):
 
         # -----------------------------------------------------
-        # Esperar hasta tener una medida del LiDAR
+        # Todavia no tenemos datos del LiDAR
         # -----------------------------------------------------
 
-        if self.distancia_actual is None:
+        if self.sectores_minimos is None:
 
             return
 
@@ -136,21 +293,55 @@ class ObstacleAvoidance(Node):
         )
 
         # =====================================================
+        # ESPERANDO DATOS INICIALES
+        # =====================================================
+
+        if self.estado == 'ESPERANDO_LIDAR':
+
+            self.get_logger().info(
+                'Datos de sectores recibidos.'
+            )
+
+            self.estado = 'INICIO'
+
+        # =====================================================
         # ESTADO INICIAL
         # =====================================================
 
-        if self.estado == 'INICIO':
+        elif self.estado == 'INICIO':
 
-            self.get_logger().info(
-                f'Distancia inicial: '
-                f'{self.distancia_actual:.3f} m'
+            frente = self.obtener_distancia_zona(
+                self.sectores_frente
             )
 
-            if (
-                self.distancia_actual
-                >
-                self.distancia_obstaculo
-            ):
+            izquierda = self.obtener_distancia_zona(
+                self.sectores_izquierda
+            )
+
+            derecha = self.obtener_distancia_zona(
+                self.sectores_derecha
+            )
+
+            self.get_logger().info(
+                f'INICIO -> '
+                f'Frente: {frente:.3f} m | '
+                f'Izquierda: {izquierda:.3f} m | '
+                f'Derecha: {derecha:.3f} m'
+            )
+
+            if math.isnan(frente):
+
+                self.get_logger().warning(
+                    'Sin medicion valida al frente'
+                )
+
+                return
+
+            # -------------------------------------------------
+            # Camino libre
+            # -------------------------------------------------
+
+            if frente >= self.distancia_libre:
 
                 self.enviar_comando(
                     'adelante'
@@ -172,19 +363,31 @@ class ObstacleAvoidance(Node):
 
         elif self.estado == 'AVANZANDO':
 
-            if (
-                self.distancia_actual
-                <=
-                self.distancia_obstaculo
-            ):
+            frente = self.obtener_distancia_zona(
+                self.sectores_frente
+            )
+
+            if math.isnan(frente):
+
+                self.get_logger().warning(
+                    'No hay medicion valida del frente'
+                )
+
+                return
+
+            # -------------------------------------------------
+            # Obstaculo detectado
+            # -------------------------------------------------
+
+            if frente <= self.distancia_obstaculo:
 
                 self.get_logger().warning(
                     '=============================='
                 )
 
                 self.get_logger().warning(
-                    f'OBSTACULO A '
-                    f'{self.distancia_actual:.3f} m'
+                    f'OBSTACULO AL FRENTE: '
+                    f'{frente:.3f} m'
                 )
 
                 self.get_logger().warning(
@@ -198,18 +401,93 @@ class ObstacleAvoidance(Node):
                 self.estado = 'OBSTACULO'
 
         # =====================================================
-        # OBSTÁCULO DETECTADO
+        # OBSTACULO DETECTADO
         # =====================================================
 
         elif self.estado == 'OBSTACULO':
 
-            self.get_logger().info(
-                'Iniciando maniobra de evasión'
+            izquierda = self.obtener_distancia_zona(
+                self.sectores_izquierda
             )
 
-            comando = (
-                f'girar {self.angulo_giro}'
+            derecha = self.obtener_distancia_zona(
+                self.sectores_derecha
             )
+
+            self.get_logger().info(
+                f'EVALUANDO EVASION -> '
+                f'Izquierda: {izquierda:.3f} m | '
+                f'Derecha: {derecha:.3f} m'
+            )
+
+            # -------------------------------------------------
+            # Ninguno de los lados tiene medicion
+            # -------------------------------------------------
+
+            if (
+                math.isnan(izquierda)
+                and
+                math.isnan(derecha)
+            ):
+
+                self.get_logger().warning(
+                    'No hay mediciones validas '
+                    'a izquierda ni derecha'
+                )
+
+                return
+
+            # -------------------------------------------------
+            # Solo izquierda disponible
+            # -------------------------------------------------
+
+            if math.isnan(derecha):
+
+                lado = 'izquierda'
+
+            # -------------------------------------------------
+            # Solo derecha disponible
+            # -------------------------------------------------
+
+            elif math.isnan(izquierda):
+
+                lado = 'derecha'
+
+            # -------------------------------------------------
+            # Ambas disponibles
+            # -------------------------------------------------
+
+            elif izquierda >= derecha:
+
+                lado = 'izquierda'
+
+            else:
+
+                lado = 'derecha'
+
+            # -------------------------------------------------
+            # Ejecutar giro
+            # -------------------------------------------------
+
+            if lado == 'izquierda':
+
+                comando = (
+                    f'girar -{self.angulo_giro}'
+                )
+
+                self.get_logger().info(
+                    'Espacio mayor a la IZQUIERDA'
+                )
+
+            else:
+
+                comando = (
+                    f'girar {self.angulo_giro}'
+                )
+
+                self.get_logger().info(
+                    'Espacio mayor a la DERECHA'
+                )
 
             self.enviar_comando(
                 comando
@@ -224,7 +502,7 @@ class ObstacleAvoidance(Node):
             self.estado = 'GIRANDO'
 
         # =====================================================
-        # ESPERANDO QUE TERMINE EL GIRO
+        # ESPERANDO FIN DEL GIRO
         # =====================================================
 
         elif self.estado == 'GIRANDO':
@@ -238,24 +516,38 @@ class ObstacleAvoidance(Node):
                 self.estado = 'VERIFICAR'
 
         # =====================================================
-        # VERIFICAR CAMINO DESPUÉS DEL GIRO
+        # VERIFICAR DESPUES DEL GIRO
         # =====================================================
 
         elif self.estado == 'VERIFICAR':
 
+            frente = self.obtener_distancia_zona(
+                self.sectores_frente
+            )
+
+            izquierda = self.obtener_distancia_zona(
+                self.sectores_izquierda
+            )
+
+            derecha = self.obtener_distancia_zona(
+                self.sectores_derecha
+            )
+
             self.get_logger().info(
-                f'Distancia despues del giro: '
-                f'{self.distancia_actual:.3f} m'
+                f'VERIFICACION -> '
+                f'Frente: {frente:.3f} m | '
+                f'Izquierda: {izquierda:.3f} m | '
+                f'Derecha: {derecha:.3f} m'
             )
 
             if (
-                self.distancia_actual
-                >=
-                self.distancia_libre
+                not math.isnan(frente)
+                and
+                frente >= self.distancia_libre
             ):
 
                 self.get_logger().info(
-                    'Camino libre'
+                    'Camino libre despues del giro'
                 )
 
                 self.enviar_comando(
@@ -270,11 +562,31 @@ class ObstacleAvoidance(Node):
                     'El obstaculo continua'
                 )
 
-                self.get_logger().info(
-                    'Se realizara otro giro'
+                self.enviar_comando(
+                    'parar'
                 )
 
                 self.estado = 'OBSTACULO'
+
+    # =========================================================
+    # CIERRE
+    # =========================================================
+
+    def destroy_node(self):
+
+        # Intentar detener el robot antes de cerrar.
+
+        try:
+
+            self.enviar_comando(
+                'parar'
+            )
+
+        except Exception:
+
+            pass
+
+        super().destroy_node()
 
 
 # =============================================================
@@ -285,9 +597,11 @@ def main(args=None):
 
     rclpy.init(args=args)
 
-    nodo = ObstacleAvoidance()
+    nodo = None
 
     try:
+
+        nodo = ObstacleAvoidance()
 
         rclpy.spin(nodo)
 
@@ -295,17 +609,21 @@ def main(args=None):
 
         pass
 
-    # ---------------------------------------------------------
-    # PARADA DE SEGURIDAD AL CERRAR EL NODO
-    # ---------------------------------------------------------
+    except Exception as e:
 
-    nodo.enviar_comando(
-        'parar'
-    )
+        print(
+            f'Error en obstacle_avoidance: {e}'
+        )
 
-    nodo.destroy_node()
+    finally:
 
-    rclpy.shutdown()
+        if nodo is not None:
+
+            nodo.destroy_node()
+
+        if rclpy.ok():
+
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

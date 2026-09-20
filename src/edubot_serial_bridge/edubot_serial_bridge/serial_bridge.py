@@ -13,7 +13,7 @@ class SerialBridge(Node):
         # ==========================
         # PARÁMETROS SERIAL
         # ==========================
-        self.declare_parameter('port', '/dev/ttyUSB0')
+        self.declare_parameter('port', '/dev/serial/by-path/platform-xhci-hcd.1-usb-0:1:1.0-port0')
         self.declare_parameter('baud', 115200)
 
         puerto = self.get_parameter('port').value

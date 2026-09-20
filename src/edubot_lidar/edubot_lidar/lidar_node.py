@@ -1,10 +1,12 @@
+import math
+import statistics
+
 import rclpy
 from rclpy.node import Node
 
-from std_msgs.msg import Float32
+from std_msgs.msg import Float32MultiArray
 
 import ydlidar
-import math
 
 
 class LidarNode(Node):
@@ -14,20 +16,63 @@ class LidarNode(Node):
         super().__init__('lidar_node')
 
         # =====================================================
-        # PUBLICADOR ROS 2
+        # CONFIGURACION DE LOS CONOS
         # =====================================================
 
-        self.publicador_distancia = self.create_publisher(
-            Float32,
-            '/lidar/distancia',
+        # 360 grados divididos en conos de 10 grados.
+
+        self.apertura_cono = 10.0
+        self.paso_conos = 10.0
+        self.num_conos = 36
+
+        # Centros:
+        #
+        # 0, 10, 20, ..., 350 grados
+
+        self.centros = [
+            i * self.paso_conos
+            for i in range(self.num_conos)
+        ]
+
+        # =====================================================
+        # RANGO VALIDO DEL LIDAR
+        # =====================================================
+
+        self.rango_min = 0.12
+        self.rango_max = 10.0
+
+        # =====================================================
+        # PUBLICADORES
+        # =====================================================
+
+        # Distancia minima de cada uno de los 36 sectores.
+        #
+        # indice 0  -> centro 0 grados
+        # indice 1  -> centro 10 grados
+        # indice 2  -> centro 20 grados
+        # ...
+        # indice 35 -> centro 350 grados
+
+        self.publicador_minimos = self.create_publisher(
+            Float32MultiArray,
+            '/lidar/sectores_minimos',
+            10
+        )
+
+        # Mediana de cada sector.
+        #
+        # Este dato conserva la metodologia utilizada
+        # durante el experimento de cobertura.
+
+        self.publicador_medianas = self.create_publisher(
+            Float32MultiArray,
+            '/lidar/sectores_medianas',
             10
         )
 
         # =====================================================
-        # PUERTO FÍSICO DEL YDLIDAR X4
+        # PUERTO FISICO DEL YDLIDAR
         # =====================================================
-        #
-        # Se usa by-path para evitar confundirlo con el ESP32.
 
         self.puerto = (
             '/dev/serial/by-path/'
@@ -39,7 +84,7 @@ class LidarNode(Node):
         )
 
         # =====================================================
-        # INICIALIZACIÓN DEL SDK
+        # INICIALIZAR SDK
         # =====================================================
 
         ydlidar.os_init()
@@ -47,7 +92,7 @@ class LidarNode(Node):
         self.laser = ydlidar.CYdLidar()
 
         # =====================================================
-        # CONFIGURACIÓN VALIDADA DEL X4
+        # CONFIGURACION YDLIDAR X4
         # =====================================================
 
         self.laser.setlidaropt(
@@ -145,8 +190,65 @@ class LidarNode(Node):
         )
 
         self.get_logger().info(
-            'Midiendo distancia...'
+            'Midiendo LiDAR por sectores de 10 grados...'
         )
+
+    # =========================================================
+    # NORMALIZAR ANGULO
+    # =========================================================
+
+    def normalizar_angulo(self, angulo):
+
+        # Entrada:
+        #
+        # aproximadamente -180 ... +180
+        #
+        # Salida:
+        #
+        # 0 ... 360
+
+        grados = math.degrees(angulo)
+
+        if grados < 0:
+
+            grados += 360.0
+
+        return grados
+
+    # =========================================================
+    # OBTENER INDICE DEL CONO
+    # =========================================================
+
+    def obtener_indice_cono(self, angulo_grados):
+
+        # Cada cono tiene 10 grados de apertura.
+        #
+        # Por ejemplo:
+        #
+        # centro 0°:
+        # 355° ... 0° ... 5°
+        #
+        # centro 10°:
+        # 5° ... 10° ... 15°
+        #
+        # centro 20°:
+        # 15° ... 20° ... 25°
+
+        indice = int(
+            math.floor(
+                (
+                    angulo_grados
+                    +
+                    self.apertura_cono / 2.0
+                )
+                /
+                self.paso_conos
+            )
+        )
+
+        indice %= self.num_conos
+
+        return indice
 
     # =========================================================
     # LECTURA DEL LIDAR
@@ -166,68 +268,180 @@ class LidarNode(Node):
 
             return
 
-        sumatoria = 0.0
-        contador = 0
+        # =====================================================
+        # LISTAS DE DISTANCIAS
+        # =====================================================
+
+        distancias_por_cono = [
+            []
+            for _ in range(self.num_conos)
+        ]
 
         # =====================================================
-        # CONO ALREDEDOR DE 90 GRADOS
+        # CLASIFICAR PUNTOS
         # =====================================================
-        #
-        # 1.536 rad ≈ 88 grados
-        # 1.606 rad ≈ 92 grados
-        #
-        # Conservamos la región utilizada en la prueba
-        # experimental que ya funcionó.
 
         for point in self.scan.points:
 
-            if (
-                point.angle > 1.536
-                and
-                point.angle < 1.606
+            # -------------------------------------------------
+            # Validar rango
+            # -------------------------------------------------
+
+            if not (
+                self.rango_min
+                <=
+                point.range
+                <=
+                self.rango_max
             ):
 
-                if point.angle > math.pi / 2:
+                continue
 
-                    lx = (
-                        point.range
-                        *
-                        math.cos(
-                            point.angle
-                            -
-                            math.pi / 2
-                        )
-                    )
+            # -------------------------------------------------
+            # Convertir angulo
+            # -------------------------------------------------
 
-                    # Ignorar valores nulos o inválidos
-
-                    if lx > 0:
-
-                        sumatoria += lx
-                        contador += 1
-
-        # =====================================================
-        # PUBLICAR MEDIDA
-        # =====================================================
-
-        if contador > 0:
-
-            promedio = sumatoria / contador
-
-            mensaje = Float32()
-
-            mensaje.data = float(promedio)
-
-            self.publicador_distancia.publish(
-                mensaje
+            angulo_grados = self.normalizar_angulo(
+                point.angle
             )
 
-            self.get_logger().info(
-                f'Distancia: {promedio:.3f} m'
+            # -------------------------------------------------
+            # Determinar cono
+            # -------------------------------------------------
+
+            indice = self.obtener_indice_cono(
+                angulo_grados
             )
+
+            # -------------------------------------------------
+            # Guardar distancia
+            # -------------------------------------------------
+
+            distancias_por_cono[indice].append(
+                point.range
+            )
+
+        # =====================================================
+        # CALCULAR MINIMOS Y MEDIANAS
+        # =====================================================
+
+        distancias_minimas = []
+        distancias_medianas = []
+
+        for i in range(self.num_conos):
+
+            datos = distancias_por_cono[i]
+
+            if datos:
+
+                distancia_minima = min(
+                    datos
+                )
+
+                distancia_mediana = statistics.median(
+                    datos
+                )
+
+            else:
+
+                # NaN indica que ese sector no tuvo
+                # una medicion valida en este barrido.
+
+                distancia_minima = float('nan')
+                distancia_mediana = float('nan')
+
+            distancias_minimas.append(
+                float(distancia_minima)
+            )
+
+            distancias_medianas.append(
+                float(distancia_mediana)
+            )
+
+        # =====================================================
+        # PUBLICAR MINIMOS
+        # =====================================================
+
+        mensaje_minimos = Float32MultiArray()
+
+        mensaje_minimos.data = (
+            distancias_minimas
+        )
+
+        self.publicador_minimos.publish(
+            mensaje_minimos
+        )
+
+        # =====================================================
+        # PUBLICAR MEDIANAS
+        # =====================================================
+
+        mensaje_medianas = Float32MultiArray()
+
+        mensaje_medianas.data = (
+            distancias_medianas
+        )
+
+        self.publicador_medianas.publish(
+            mensaje_medianas
+        )
+
+        # =====================================================
+        # INFORMACION DE DEPURACION
+        # =====================================================
+
+        # Mostrar algunos sectores para poder verificar
+        # rapidamente el funcionamiento.
+
+        sectores_mostrar = [
+            0,
+            10,
+            20,
+            30,
+            40,
+            50,
+            60,
+            70,
+            80,
+            90,
+            100,
+            110,
+            120,
+            130,
+            140,
+            150,
+            160,
+            170
+        ]
+
+        texto = []
+
+        for angulo in sectores_mostrar:
+
+            indice = int(
+                angulo / 10
+            )
+
+            valor = distancias_minimas[indice]
+
+            if math.isnan(valor):
+
+                texto.append(
+                    f'{angulo}°: --'
+                )
+
+            else:
+
+                texto.append(
+                    f'{angulo}°: {valor:.2f}m'
+                )
+
+        self.get_logger().info(
+            ' | '.join(texto)
+        )
 
     # =========================================================
-    # CIERRE DEL NODO
+    # CIERRE
     # =========================================================
 
     def destroy_node(self):
@@ -239,6 +453,7 @@ class LidarNode(Node):
         try:
 
             self.laser.turnOff()
+
             self.laser.disconnecting()
 
         except Exception:
